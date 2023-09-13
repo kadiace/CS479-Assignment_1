@@ -69,6 +69,22 @@ class PointNetFeat(nn.Module):
 
         # point-wise mlp
         # TODO : Implement point-wise mlp model based on PointNet Architecture.
+        self.mlp1 = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Linear(64, 64)
+        )
+        self.mlp2 = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, 1024),
+        )
+        self.n64 = []
 
     def forward(self, pointcloud):
         """
@@ -80,7 +96,32 @@ class PointNetFeat(nn.Module):
         """
 
         # TODO : Implement forward function.
-        pass
+        x = pointcloud
+        B = x.shape[0]
+        N = x.shape[1]
+        maxpool = nn.MaxPool1d(N)
+        
+        if self.input_transform:
+            transform3 = self.stn3(x.permute(0, 2, 1))
+            x = torch.matmul(x, transform3) # [B, N, 3]
+
+        x = x.view(B * N, x.shape[2])
+        x = self.mlp1(x)
+        x = x.view(B, N, -1) # [B, N, 64]
+
+        if self.feature_transform:
+            transform64 = self.stn64(x.permute(0, 2, 1))
+            x = torch.matmul(x, transform64) # [B, N, 64]
+        
+        n64 = x.clone().detach()
+        
+        x = x.view(B * N, x.shape[2])
+        x = self.mlp2(x)
+        x = x.view(B, N, -1) # [B, N, 1024]
+
+        x = maxpool(x.permute(0, 2, 1))
+        x = x.view(B, -1) # [B, 1024]
+        return x, n64
 
 
 class PointNetCls(nn.Module):
@@ -93,6 +134,15 @@ class PointNetCls(nn.Module):
         
         # returns the final logits from the max-pooled features.
         # TODO : Implement MLP that takes global feature as an input and return logits.
+        self.mlp_cls = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, num_classes)
+        )
 
     def forward(self, pointcloud):
         """
@@ -103,8 +153,10 @@ class PointNetCls(nn.Module):
             - ...
         """
         # TODO : Implement forward function.
-        pass
-
+        x = pointcloud
+        x, n64 = self.pointnet_feat(x)   # [B, 1024]
+        x = self.mlp_cls(x)         # [B, num_classes]
+        return x
 
 class PointNetPartSeg(nn.Module):
     def __init__(self, m=50):
@@ -112,7 +164,24 @@ class PointNetPartSeg(nn.Module):
 
         # returns the logits for m part labels each point (m = # of parts = 50).
         # TODO: Implement part segmentation model based on PointNet Architecture.
-        pass
+        
+        self.pointnet_feat = PointNetFeat()
+
+        self.part_seg_mlp1 = nn.Sequential(
+            nn.Linear(1088, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+        )
+        self.part_seg_mlp2 = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Linear(128, m)
+        )
 
     def forward(self, pointcloud):
         """
@@ -123,7 +192,23 @@ class PointNetPartSeg(nn.Module):
             - ...
         """
         # TODO: Implement forward function.
-        pass
+        x = pointcloud
+        B = x.shape[0]
+        N = x.shape[1]
+
+        x, n64 = self.pointnet_feat(x)   # [B, 1024]
+        extend_x = x.unsqueeze(1).expand(-1, N, -1)
+        x = torch.cat((n64, extend_x), dim=2) # [B, N, 1088]
+
+        x = x.view(B * N, x.shape[2])
+        x = self.part_seg_mlp1(x)
+        x = x.view(B, N, -1) # [B, N, 128]
+
+        x = x.view(B * N, x.shape[2])
+        x = self.part_seg_mlp2(x)
+        x = x.view(B, -1, N)
+
+        return x
 
 
 class PointNetAutoEncoder(nn.Module):
